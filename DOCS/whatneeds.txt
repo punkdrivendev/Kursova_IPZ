@@ -1,0 +1,11 @@
+Структура проекту
+
+Class UI -> App, InputController, UserInterface
+
+Class SystemInfo -> SystemInfoService
+
+Class AnalyzeDir -> DirSelectionService, SearchDirService
+
+Class DirectorySort -> DirSortService
+
+Багато поточність Rayon
