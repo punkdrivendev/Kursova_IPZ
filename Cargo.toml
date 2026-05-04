@@ -1,8 +1,9 @@
 [package]
-name = "kursova_ipz"
-path = "src/lib.rs"
+name = "disk_analyzer"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 sysinfo = "0.30"
+rusqlite = { version = "0.39", features = ["bundled"] }
+chrono = "0.4"

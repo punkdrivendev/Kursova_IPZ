@@ -2,12 +2,18 @@ use sysinfo::{Disk, Disks};
 
 pub struct SystemInfoService {
     disks: Disks,
+    total_disk_space: u64,
+    free_disk_space: u64,
+    used_disk_space: u64,
 }
 
 impl SystemInfoService {
     pub fn new() -> Self {
         Self {
             disks: Disks::new_with_refreshed_list(),
+            total_disk_space: 0,
+            free_disk_space: 0,
+            used_disk_space: 0,
         }
     }
 
@@ -19,15 +25,27 @@ impl SystemInfoService {
         self.disks.list().get(selection)
     }
 
-    pub fn get_total_space(selected_disk: &Disk) -> u64 {
-        selected_disk.total_space()
+    pub fn load_disk_stats(&mut self, selection: usize) -> bool {
+        if let Some(selected_disk) = self.disks.list().get(selection) {
+            self.total_disk_space = selected_disk.total_space();
+            self.free_disk_space = selected_disk.available_space();
+            self.used_disk_space = self.total_disk_space - self.free_disk_space;
+
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn get_free_space(selected_disk: &Disk) -> u64 {
-        selected_disk.available_space()
+    pub fn get_total_disk_space(&self) -> u64 {
+        self.total_disk_space
     }
 
-    pub fn get_used_space(total_space: u64, free_space: u64) -> u64 {
-        total_space - free_space
+    pub fn get_free_disk_space(&self) -> u64 {
+        self.free_disk_space
+    }
+
+    pub fn get_used_disk_space(&self) -> u64 {
+        self.used_disk_space
     }
 }
