@@ -1,7 +1,5 @@
-use disk_analyzer::models::*;
-use disk_analyzer::stat_services::system_info_service::SystemInfoService;
-fn main(){
-    let service = SystemInfoService::new();
-    
+use disk_analyzer::tui::run_tui;
 
+fn main() -> std::io::Result<()> {
+    run_tui()
 }

@@ -1,48 +1,80 @@
-
-/*
-Модуль скануваня файлової системи
-Рекурсовино обходить директорії
-Визначає типи об'єктів файлової системи та передає 
-знайдені дані на подальшу обробку.
-*/
 use crate::models::{FileNode, NodeType};
+use rayon::prelude::*;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct Scanner {
-    pub show_hidden: bool, // чи показувати приховані файли та директорії
+    pub show_hidden: bool,
+    pub scan_system_dirs: bool,
 }
 
 impl Scanner {
     pub fn new(show_hidden: bool) -> Self {
         Self {
-            show_hidden, // 
+            show_hidden,
+            scan_system_dirs: false,
         }
     }
 
-    pub fn scan(&self, path: &Path) -> Option<FileNode> {  // функція сканування одного шляху
-        let metadata = match fs::metadata(path) {
+    pub fn new_with_options(show_hidden: bool, scan_system_dirs: bool) -> Self {
+        Self {
+            show_hidden,
+            scan_system_dirs,
+        }
+    }
+
+    fn should_skip_path(&self, path: &Path) -> bool {
+        if self.scan_system_dirs {
+            return false;
+        }
+
+        path.starts_with("/proc")
+            || path.starts_with("/sys")
+            || path.starts_with("/dev")
+            || path.starts_with("/run")
+            || path.starts_with("/tmp")
+    }
+
+    pub fn scan(&self, path: &Path) -> Option<FileNode> {
+        if self.should_skip_path(path) {
+            return None;
+        }
+
+        let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
-            Err(error) => {
-                println!("Cannot read metadata {:?}: {}", path, error); // помилка читання метаданних
-                return None;
-            }
+            Err(_) => return None,
         };
 
-        let name = path  
-            .file_name() // бере останню частину шляху: назву файлу або директорії
-            .map(|name| name.to_string_lossy().to_string()) // якщо назва є, перетворюємо її у String
-            .unwrap_or_else(|| path.to_string_lossy().to_string()); // якщо назви немає, використовуємо повний шлях
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
 
         if !self.show_hidden && name.starts_with('.') {
-            return None;  // якщо приховані файли вимкнені, пропускаємо елементи, назва яких починається з крапки
+            return None;
         }
 
         let extension = path
-            .extension()  // отримує розширення файлу, якщо воно є
-            .map(|ext| ext.to_string_lossy().to_string()); // якщо розширення є, перетворюємо його у String
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_string());
 
-        if metadata.is_file() { // якщо поточний шлях є файлом, створюємо FileNode з даними цього файлу
+        let file_type = metadata.file_type();
+
+        if file_type.is_symlink() {
+            return Some(FileNode {
+                id: None,
+                parent_id: None,
+                path: path.to_string_lossy().to_string(),
+                name,
+                extension,
+                size: metadata.len(),
+                node_type: NodeType::Symlink,
+                children: Vec::new(),
+                category: None,
+            });
+        }
+
+        if metadata.is_file() {
             return Some(FileNode {
                 id: None,
                 parent_id: None,
@@ -56,15 +88,10 @@ impl Scanner {
             });
         }
 
-        if metadata.is_dir() { //якщо поточних шлях є директорією
-            let mut children = Vec::new(); // список дочірніх файлів і директорій
-            let mut total_size = 0; // сумарний розмір вмісту директорії у байтах
-
-            let entries = match fs::read_dir(path) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    println!("Cannot read directory {:?}: {}", path, error);
-
+        if metadata.is_dir() {
+            let child_paths = match Self::read_child_paths(path) {
+                Some(paths) => paths,
+                None => {
                     return Some(FileNode {
                         id: None,
                         parent_id: None,
@@ -73,28 +100,16 @@ impl Scanner {
                         extension: None,
                         size: 0,
                         node_type: NodeType::Directory,
-                        children,
+                        children: Vec::new(),
                         category: None,
                     });
                 }
             };
 
-            for entry in entries {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        println!("Cannot read entry: {}", error);
-                        continue;
-                    }
-                };
-
-                let child_path = entry.path(); // шлях до дочірнього елемента
-
-                if let Some(child_node) = self.scan(&child_path) {
-                    total_size += child_node.size;  // додаємо розмір дочірнього елемента до розміру директорії
-                    children.push(child_node); // додаємо знайдений файл або папку у список children поточної директорії
-                }
-            }
+            let children: Vec<FileNode> = child_paths
+                .par_iter()
+                .filter_map(|child_path| self.scan(child_path))
+                .collect();
 
             return Some(FileNode {
                 id: None,
@@ -102,7 +117,7 @@ impl Scanner {
                 path: path.to_string_lossy().to_string(),
                 name,
                 extension: None,
-                size: total_size,
+                size: 0,
                 node_type: NodeType::Directory,
                 children,
                 category: None,
@@ -110,5 +125,19 @@ impl Scanner {
         }
 
         None
+    }
+
+    fn read_child_paths(path: &Path) -> Option<Vec<PathBuf>> {
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(_) => return None,
+        };
+
+        let paths: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect();
+
+        Some(paths)
     }
 }

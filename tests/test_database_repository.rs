@@ -1,3 +1,30 @@
+use disk_analyzer::models::*;
+use disk_analyzer::stat_services::database_repository::DatabaseRepository;
+
+use rusqlite::Connection;
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn create_test_database() -> String {
+    let unique_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    let db_path = std::env::temp_dir()
+        .join(format!("disk_analyzer_test_{}.db", unique_id));
+
+    let db_path_string = db_path.to_string_lossy().to_string();
+
+    let connection = Connection::open(&db_path_string).unwrap();
+
+    let schema = include_str!("../src/migrations/init.sql");
+
+    connection.execute_batch(schema).unwrap();
+
+    db_path_string
+}
+
 #[test]
 fn test_save_nodes() {
     let db_path = create_test_database();
