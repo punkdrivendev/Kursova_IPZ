@@ -2,7 +2,6 @@ use crate::file_actions::DeleteService;
 use crate::models::*;
 use crate::scanner_services::Scanner;
 use crate::size_calculator::SizeCalculator;
-use crate::sort_service::SortService;
 use crate::stat_services::database_repository::DatabaseRepository;
 use crate::stat_services::statistics_service::StatService;
 
@@ -577,7 +576,6 @@ impl TuiApp {
                 self.current_scan_id = Some(scan_id);
                 self.current_is_full_persistent_scan = self.pending_is_disk_scan;
 
-                self.sort_current_tree();
                 self.rebuild_rows();
 
                 self.screen = AppScreen::FileTree;
@@ -759,7 +757,6 @@ impl TuiApp {
                 self.current_scan_id = scan_id;
                 self.current_is_full_persistent_scan = persistent;
 
-                self.sort_current_tree();
                 self.rebuild_rows();
 
                 self.scan_receiver = None;
@@ -804,7 +801,6 @@ impl TuiApp {
                 self.root_node = Some(root_node);
                 self.expanded_paths.remove(&deleted_path);
 
-                self.sort_current_tree();
                 self.rebuild_rows();
 
                 if self.selected_index >= self.rows.len() {
@@ -1024,8 +1020,9 @@ impl TuiApp {
 
     pub fn set_sort_mode(&mut self, sort_mode: SortMode) {
         self.sort_mode = sort_mode;
-        self.sort_current_tree();
+        self.sort_visible_tree();
         self.rebuild_rows();
+        self.status_message = format!("Sort mode: {:?}", self.sort_mode);
     }
 
     pub fn toggle_hidden_mode(&mut self) {
@@ -1065,23 +1062,45 @@ impl TuiApp {
         }
     }
 
-    fn sort_current_tree(&mut self) {
+    fn sort_visible_tree(&mut self) {
         if let Some(root_node) = &mut self.root_node {
-            Self::sort_node_recursive(root_node, self.sort_mode);
+            Self::sort_visible_node(root_node, &self.expanded_paths, self.sort_mode);
         }
     }
 
-    fn sort_node_recursive(node: &mut FileNode, sort_mode: SortMode) {
-        let children = std::mem::take(&mut node.children);
+    fn sort_visible_node(
+        node: &mut FileNode,
+        expanded_paths: &HashSet<String>,
+        sort_mode: SortMode,
+    ) {
+        Self::sort_nodes(&mut node.children, sort_mode);
 
-        node.children = match sort_mode {
-            SortMode::Name => SortService::by_name(children),
-            SortMode::Size => SortService::by_size(children),
-            SortMode::Type => SortService::by_type(children),
-        };
+        if node.node_type == NodeType::Directory && expanded_paths.contains(&node.path) {
+            for child in &mut node.children {
+                Self::sort_visible_node(child, expanded_paths, sort_mode);
+            }
+        }
+    }
 
-        for child in &mut node.children {
-            Self::sort_node_recursive(child, sort_mode);
+    fn sort_nodes(children: &mut Vec<FileNode>, sort_mode: SortMode) {
+        match sort_mode {
+            SortMode::Name => {
+                children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            }
+            SortMode::Size => children.sort_by(|a, b| b.size.cmp(&a.size)),
+            SortMode::Type => children.sort_by(|a, b| {
+                Self::node_type_order(&a.node_type)
+                    .cmp(&Self::node_type_order(&b.node_type))
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            }),
+        }
+    }
+
+    fn node_type_order(node_type: &NodeType) -> u8 {
+        match node_type {
+            NodeType::Directory => 0,
+            NodeType::File => 1,
+            NodeType::Symlink => 2,
         }
     }
 
