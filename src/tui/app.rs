@@ -9,9 +9,9 @@ use crate::stat_services::statistics_service::StatService;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver},
+    Arc,
 };
 use std::thread;
 
@@ -830,47 +830,51 @@ impl TuiApp {
             self.selected_index = self.rows.len().saturating_sub(1);
         }
 
-        self.update_database_after_delete(&target.path);
-
-        self.status_message = format!("Deleted: {}", target.path);
+        self.status_message = match self.update_database_after_delete(&target.path) {
+            Ok(()) => format!("Deleted: {}", target.path),
+            Err(message) => format!("Deleted from disk, but {}", message),
+        };
         self.delete_target = None;
         self.screen = AppScreen::FileTree;
     }
 
-    fn update_database_after_delete(&mut self, deleted_path: &str) {
+    fn update_database_after_delete(&mut self, deleted_path: &str) -> Result<(), String> {
         let Some(scan_id) = self.current_scan_id else {
-            return;
+            return Ok(());
         };
 
         let mut repository = match DatabaseRepository::new(&self.db_path) {
             Ok(repository) => repository,
             Err(_) => {
-                self.status_message = String::from("Deleted from disk, but database open failed");
-                return;
+                return Err(String::from("database open failed"));
             }
         };
 
         if self.current_is_full_persistent_scan {
             let Some(root_node) = &self.root_node else {
-                return;
+                return Ok(());
             };
 
             let statistics = StatService::group_by_categories(root_node);
             let (files_count, dirs_count) = Self::count_nodes(root_node);
 
-            if repository
-                .replace_scan_data(scan_id, root_node, &statistics, files_count, dirs_count)
-                .is_err()
-            {
-                self.status_message = String::from("Deleted from disk, but database update failed");
-            }
-        } else if repository
-            .delete_path_from_scan(scan_id, deleted_path)
-            .is_err()
-        {
-            self.status_message =
-                String::from("Deleted from disk, but database path delete failed");
+            repository
+                .apply_delete_to_full_scan(
+                    scan_id,
+                    deleted_path,
+                    root_node,
+                    &statistics,
+                    files_count,
+                    dirs_count,
+                )
+                .map_err(|error| format!("database update failed: {}", error))?;
+        } else {
+            repository
+                .delete_path_from_scan(scan_id, deleted_path)
+                .map_err(|error| format!("database path delete failed: {}", error))?;
         }
+
+        Ok(())
     }
 
     fn remove_node_by_path(node: &mut FileNode, target_path: &str) -> bool {

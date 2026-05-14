@@ -1,5 +1,5 @@
 use crate::models::*;
-use rusqlite::{Connection, OptionalExtension, Result, Transaction, params};
+use rusqlite::{params, Connection, OptionalExtension, Result, Transaction};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -259,6 +259,18 @@ impl DatabaseRepository {
     pub fn save_statistics(&mut self, scan_id: i64, statistics: &[FileStatistic]) -> Result<()> {
         let tx = self.connection.transaction()?;
 
+        Self::save_statistics_tx(&tx, scan_id, statistics)?;
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    fn save_statistics_tx(
+        tx: &Transaction<'_>,
+        scan_id: i64,
+        statistics: &[FileStatistic],
+    ) -> Result<()> {
         for stat in statistics {
             tx.execute(
                 "
@@ -280,8 +292,6 @@ impl DatabaseRepository {
                 ],
             )?;
         }
-
-        tx.commit()?;
 
         Ok(())
     }
@@ -363,6 +373,78 @@ impl DatabaseRepository {
             ",
             params![scan_id, path, normalized_path, like_pattern],
         )?;
+
+        Ok(())
+    }
+
+    pub fn apply_delete_to_full_scan(
+        &mut self,
+        scan_id: i64,
+        deleted_path: &str,
+        root: &FileNode,
+        statistics: &[FileStatistic],
+        files_count: u64,
+        dirs_count: u64,
+    ) -> Result<()> {
+        let normalized_path = Self::normalize_path(deleted_path);
+        let like_pattern = format!("{}/%", normalized_path.trim_end_matches('/'));
+        let tx = self.connection.transaction()?;
+
+        tx.execute(
+            "
+            DELETE FROM file_nodes
+            WHERE scan_id = ?1
+              AND (
+                    path = ?2
+                    OR path = ?3
+                    OR path LIKE ?4
+              )
+            ",
+            params![scan_id, deleted_path, normalized_path, like_pattern],
+        )?;
+
+        Self::update_node_sizes_tx(&tx, scan_id, root)?;
+
+        tx.execute(
+            "DELETE FROM file_statistics WHERE scan_id = ?1",
+            params![scan_id],
+        )?;
+        Self::save_statistics_tx(&tx, scan_id, statistics)?;
+
+        tx.execute(
+            "
+            UPDATE scans
+            SET total_size = ?1,
+                files_count = ?2,
+                dirs_count = ?3
+            WHERE id = ?4
+            ",
+            params![
+                root.size as i64,
+                files_count as i64,
+                dirs_count as i64,
+                scan_id,
+            ],
+        )?;
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    fn update_node_sizes_tx(tx: &Transaction<'_>, scan_id: i64, node: &FileNode) -> Result<()> {
+        tx.execute(
+            "
+            UPDATE file_nodes
+            SET size = ?1
+            WHERE scan_id = ?2 AND path = ?3
+            ",
+            params![node.size as i64, scan_id, node.path],
+        )?;
+
+        for child in &node.children {
+            Self::update_node_sizes_tx(tx, scan_id, child)?;
+        }
 
         Ok(())
     }
