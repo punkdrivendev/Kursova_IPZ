@@ -11,8 +11,7 @@ fn create_test_database() -> String {
         .unwrap()
         .as_nanos();
 
-    let db_path = std::env::temp_dir()
-        .join(format!("disk_analyzer_test_{}.db", unique_id));
+    let db_path = std::env::temp_dir().join(format!("disk_analyzer_test_{}.db", unique_id));
 
     let db_path_string = db_path.to_string_lossy().to_string();
 
@@ -29,7 +28,7 @@ fn create_test_database() -> String {
 fn test_save_nodes() {
     let db_path = create_test_database();
 
-    let repository = DatabaseRepository::new(&db_path).unwrap();
+    let mut repository = DatabaseRepository::new(&db_path).unwrap();
 
     let scan = ScanSession {
         id: None,
@@ -100,7 +99,7 @@ fn test_save_nodes() {
 fn test_save_statistics() {
     let db_path = create_test_database();
 
-    let repository = DatabaseRepository::new(&db_path).unwrap();
+    let mut repository = DatabaseRepository::new(&db_path).unwrap();
 
     let scan = ScanSession {
         id: None,

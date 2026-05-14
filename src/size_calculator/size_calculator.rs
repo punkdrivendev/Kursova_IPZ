@@ -4,8 +4,10 @@ pub struct SizeCalculator;
 
 impl SizeCalculator {
     pub fn calculate(node: &mut FileNode) -> u64 {
-        match node.node_type {
+        match &node.node_type {
             NodeType::File => node.size,
+
+            NodeType::Symlink => node.size,
 
             NodeType::Directory => {
                 let mut total_size = 0;
@@ -18,8 +20,6 @@ impl SizeCalculator {
 
                 total_size
             }
-
-            NodeType::Symlink => node.size,
         }
     }
 }

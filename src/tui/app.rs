@@ -8,6 +8,12 @@ use crate::stat_services::statistics_service::StatService;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver},
+};
+use std::thread;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
@@ -16,8 +22,20 @@ pub enum AppScreen {
     PathInput,
     SavedDirectoryChoice,
     DiskSelection,
+    Scanning,
     FileTree,
     DeleteConfirm,
+}
+
+enum ScanWorkerMessage {
+    Finished {
+        root_node: FileNode,
+        scan_id: Option<i64>,
+        persistent: bool,
+        message: String,
+    },
+    Failed(String),
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +120,10 @@ pub struct TuiApp {
     delete_target: Option<TreeRow>,
 
     db_path: String,
+
+    scan_receiver: Option<Receiver<ScanWorkerMessage>>,
+    scan_cancel_flag: Option<Arc<AtomicBool>>,
+    scanning_dots: usize,
 }
 
 impl TuiApp {
@@ -112,6 +134,7 @@ impl TuiApp {
 
         Self {
             screen: AppScreen::MainMenu,
+
             menu_items: vec![
                 String::from("Scan directory"),
                 String::from("Select disk and scan"),
@@ -129,7 +152,7 @@ impl TuiApp {
 
             saved_choice_items: vec![
                 String::from("Open saved version"),
-                String::from("Scan again without saving"),
+                String::from("Scan again"),
                 String::from("Back"),
             ],
             saved_choice_index: 0,
@@ -152,100 +175,20 @@ impl TuiApp {
             pending_directory_path: None,
             pending_scan: None,
             pending_is_disk_scan: false,
-            
+
             current_scan_id: None,
             current_is_full_persistent_scan: false,
 
             delete_target: None,
 
-            db_path: String::from("data/disk_analyzer.db"),
+            db_path: Self::default_db_path(),
+
+            scan_receiver: None,
+            scan_cancel_flag: None,
+            scanning_dots: 0,
         }
     }
-    pub fn scan_system_dirs(&self) -> bool {
-        self.scan_system_dirs
-    }
-    pub fn pending_is_disk_scan(&self) -> bool {
-    self.pending_is_disk_scan
-    }
-    fn refresh_saved_choice_items(&mut self) {
-    if self.pending_is_disk_scan {
-        self.saved_choice_items = vec![
-            String::from("Open saved disk scan"),
-            String::from("Scan again and save"),
-            String::from("Back"),
-        ];
-    } else {
-        self.saved_choice_items = vec![
-            String::from("Open saved directory version"),
-            String::from("Scan again without saving"),
-            String::from("Back"),
-        ];
-    }
-    }
-    pub fn toggle_system_dirs_mode(&mut self) {
-        self.scan_system_dirs = !self.scan_system_dirs;
 
-        self.refresh_menu_items();
-
-        self.status_message = if self.scan_system_dirs {
-            String::from("System directories scanning: enabled")
-        } else {
-            String::from("System directories scanning: disabled")
-        };
-    }
-
-    fn refresh_menu_items(&mut self) {
-        if self.menu_items.len() >= 3 {
-            self.menu_items[2] = if self.scan_system_dirs {
-                String::from("Toggle system directories: on")
-            } else {
-                String::from("Toggle system directories: off")
-            };
-        }
-    }
-    pub fn request_disk_scan(&mut self, path: PathBuf) {
-        let canonical_path = match path.canonicalize() {
-            Ok(path) => path,
-            Err(_) => {
-                self.status_message = String::from("Disk path does not exist");
-                return;
-            }
-        };
-
-        let path_string = canonical_path.to_string_lossy().to_string();
-
-        let repository = match DatabaseRepository::new(&self.db_path) {
-            Ok(repository) => repository,
-            Err(_) => {
-                self.status_message =
-                    String::from("Cannot open database. Scanning disk without saved check.");
-                self.scan_path(&canonical_path, true);
-                return;
-            }
-        };
-
-        match repository.find_latest_scan_by_root_path(&path_string) {
-            Ok(Some(scan)) => {
-                self.pending_directory_path = Some(path_string);
-                self.pending_scan = Some(scan);
-                self.pending_is_disk_scan = true;
-
-                self.saved_choice_index = 0;
-                self.refresh_saved_choice_items();
-
-                self.screen = AppScreen::SavedDirectoryChoice;
-            }
-
-            Ok(None) => {
-                self.scan_path(&canonical_path, true);
-            }
-
-            Err(_) => {
-                self.status_message = String::from("Database search failed. Scanning disk again.");
-                self.scan_path(&canonical_path, true);
-            }
-        }
-    }
     pub fn screen(&self) -> AppScreen {
         self.screen
     }
@@ -318,6 +261,14 @@ impl TuiApp {
         self.show_hidden
     }
 
+    pub fn scan_system_dirs(&self) -> bool {
+        self.scan_system_dirs
+    }
+
+    pub fn pending_is_disk_scan(&self) -> bool {
+        self.pending_is_disk_scan
+    }
+
     pub fn input_path(&self) -> &str {
         &self.input_path
     }
@@ -334,6 +285,10 @@ impl TuiApp {
         self.disk_rows
             .get(self.disk_index)
             .map(|disk| disk.mount_point.clone())
+    }
+
+    pub fn scanning_dots(&self) -> usize {
+        self.scanning_dots
     }
 
     pub fn next(&mut self) {
@@ -368,7 +323,7 @@ impl TuiApp {
                 }
             }
 
-            AppScreen::PathInput | AppScreen::DeleteConfirm => {}
+            AppScreen::PathInput | AppScreen::DeleteConfirm | AppScreen::Scanning => {}
         }
     }
 
@@ -404,7 +359,7 @@ impl TuiApp {
                 }
             }
 
-            AppScreen::PathInput | AppScreen::DeleteConfirm => {}
+            AppScreen::PathInput | AppScreen::DeleteConfirm | AppScreen::Scanning => {}
         }
     }
 
@@ -418,6 +373,87 @@ impl TuiApp {
 
     pub fn clear_input(&mut self) {
         self.input_path.clear();
+    }
+
+    pub fn toggle_system_dirs_mode(&mut self) {
+        self.scan_system_dirs = !self.scan_system_dirs;
+        self.refresh_menu_items();
+
+        self.status_message = if self.scan_system_dirs {
+            String::from("System directories scanning: enabled")
+        } else {
+            String::from("System directories scanning: disabled")
+        };
+    }
+
+    fn refresh_menu_items(&mut self) {
+        if self.menu_items.len() >= 3 {
+            self.menu_items[2] = if self.scan_system_dirs {
+                String::from("Toggle system directories: on")
+            } else {
+                String::from("Toggle system directories: off")
+            };
+        }
+    }
+
+    fn refresh_saved_choice_items(&mut self) {
+        if self.pending_is_disk_scan {
+            self.saved_choice_items = vec![
+                String::from("Open saved disk scan"),
+                String::from("Scan again and save"),
+                String::from("Back"),
+            ];
+        } else {
+            self.saved_choice_items = vec![
+                String::from("Open saved directory version"),
+                String::from("Scan again and save"),
+                String::from("Back"),
+            ];
+        }
+    }
+
+    pub fn request_disk_scan(&mut self, path: PathBuf) {
+        let canonical_path = match path.canonicalize() {
+            Ok(path) => path,
+            Err(_) => {
+                self.status_message = String::from("Disk path does not exist");
+                return;
+            }
+        };
+
+        let path_string = canonical_path.to_string_lossy().to_string();
+
+        let repository = match DatabaseRepository::new(&self.db_path) {
+            Ok(repository) => repository,
+            Err(_) => {
+                self.status_message =
+                    String::from("Cannot open database. Scanning disk without saved check.");
+                self.start_scan_async(canonical_path, true);
+                return;
+            }
+        };
+
+        match repository.find_latest_scan_by_root_path(&path_string) {
+            Ok(Some(scan)) => {
+                self.pending_directory_path = Some(path_string);
+                self.pending_scan = Some(scan);
+                self.pending_is_disk_scan = true;
+
+                self.saved_choice_index = 0;
+                self.refresh_saved_choice_items();
+
+                self.screen = AppScreen::SavedDirectoryChoice;
+            }
+
+            Ok(None) => {
+                self.start_scan_async(canonical_path, true);
+            }
+
+            Err(error) => {
+                self.status_message = format!("Database search failed: {}", error);
+                self.start_scan_async(canonical_path, true);
+            }
+        }
     }
 
     pub fn request_current_directory_scan(&mut self) {
@@ -449,7 +485,7 @@ impl TuiApp {
             Ok(repository) => repository,
             Err(_) => {
                 self.status_message = String::from("Cannot open database");
-                self.scan_path(&canonical_path, false);
+                self.start_scan_async(canonical_path, true);
                 return;
             }
         };
@@ -458,24 +494,28 @@ impl TuiApp {
             Ok(Some(scan)) => {
                 self.pending_directory_path = Some(path_string);
                 self.pending_scan = Some(scan);
+                self.pending_is_disk_scan = false;
+
                 self.saved_choice_index = 0;
+                self.refresh_saved_choice_items();
+
                 self.screen = AppScreen::SavedDirectoryChoice;
             }
 
             Ok(None) => {
-                self.scan_path(&canonical_path, false);
+                self.start_scan_async(canonical_path, true);
             }
 
-            Err(_) => {
-                self.status_message = String::from("Database search failed. Scanning without saving.");
-                self.scan_path(&canonical_path, false);
+            Err(error) => {
+                self.status_message = format!("Database search failed: {}", error);
+                self.start_scan_async(canonical_path, true);
             }
         }
     }
 
     pub fn open_saved_directory_version(&mut self) {
         let Some(path) = self.pending_directory_path.clone() else {
-            self.status_message = String::from("No pending directory");
+            self.status_message = String::from("No pending path");
             return;
         };
 
@@ -488,29 +528,35 @@ impl TuiApp {
             self.status_message = String::from("Saved scan has no id");
             return;
         };
-        let mut repository = match DatabaseRepository::new(&self.db_path) {
+
+        let repository = match DatabaseRepository::new(&self.db_path) {
             Ok(repository) => repository,
-            Err(_) => {
-                self.status_message = String::from("Scan completed, but database open failed");
+            Err(error) => {
+                self.status_message = format!("Cannot open database: {}", error);
                 return;
             }
         };
 
         match repository.load_subtree_from_path(scan_id, &path) {
-            Ok(root_node) => {
+            Ok(mut root_node) => {
+                SizeCalculator::calculate(&mut root_node);
+
                 self.root_node = Some(root_node);
                 self.expanded_paths.clear();
                 self.selected_index = 0;
+
                 self.current_scan_id = Some(scan_id);
-                self.current_is_full_persistent_scan = false;
+                self.current_is_full_persistent_scan = self.pending_is_disk_scan;
+
                 self.sort_current_tree();
                 self.rebuild_rows();
+
                 self.screen = AppScreen::FileTree;
                 self.status_message = format!("Opened saved version from {}", scan.started_at);
             }
 
-            Err(_) => {
-                self.status_message = String::from("Cannot load saved directory");
+            Err(error) => {
+                self.status_message = format!("Cannot load saved version: {}", error);
             }
         }
     }
@@ -521,57 +567,97 @@ impl TuiApp {
             return;
         };
 
-        if self.pending_is_disk_scan {
-            self.scan_path(Path::new(&path), true);
-        } else {
-            self.scan_path(Path::new(&path), false);
-        }
+        self.start_scan_async(PathBuf::from(path), true);
     }
 
     pub fn scan_path(&mut self, path: &Path, persist_to_database: bool) {
-        self.status_message = format!("Scanning: {}", path.display());
-
-        let scanner = Scanner::new_with_options(
-            self.show_hidden,
-            self.scan_system_dirs,
-        );
-
-        let Some(mut root_node) = scanner.scan(path) else {
-            self.status_message = String::from("Scan failed");
-            return;
-        };
-
-        SizeCalculator::calculate(&mut root_node);
-
-        self.root_node = Some(root_node);
-        self.expanded_paths.clear();
-        self.selected_index = 0;
-        self.sort_current_tree();
-        self.rebuild_rows();
-
-        self.current_scan_id = None;
-        self.current_is_full_persistent_scan = false;
-
-        if persist_to_database {
-            self.save_current_scan_to_database(path);
-        }
-
-        self.screen = AppScreen::FileTree;
-        self.status_message = String::from("Scan completed");
+        self.start_scan_async(path.to_path_buf(), persist_to_database);
     }
 
-    fn save_current_scan_to_database(&mut self, path: &Path) {
-        let Some(root_node) = &self.root_node else {
-            return;
-        };
+    fn start_scan_async(&mut self, path: PathBuf, persist_to_database: bool) {
+        self.status_message = format!("Scanning: {}", path.display());
+        self.screen = AppScreen::Scanning;
+        self.scanning_dots = 0;
 
-        let mut repository = match DatabaseRepository::new(&self.db_path) {
-            Ok(repository) => repository,
-            Err(_) => {
-                self.status_message = String::from("Scan completed, but database open failed");
+        let (sender, receiver) = mpsc::channel();
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let worker_cancel_flag = Arc::clone(&cancel_flag);
+
+        let show_hidden = self.show_hidden;
+        let scan_system_dirs = self.scan_system_dirs;
+        let db_path = self.db_path.clone();
+
+        thread::spawn(move || {
+            let scanner = Scanner::new_with_options(show_hidden, scan_system_dirs);
+
+            let Some(mut root_node) = scanner.scan_with_cancel(&path, worker_cancel_flag.as_ref())
+            else {
+                if worker_cancel_flag.load(Ordering::Relaxed) {
+                    sender.send(ScanWorkerMessage::Cancelled).ok();
+                } else {
+                    sender
+                        .send(ScanWorkerMessage::Failed(String::from("Scan failed")))
+                        .ok();
+                }
+
+                return;
+            };
+
+            if worker_cancel_flag.load(Ordering::Relaxed) {
+                sender.send(ScanWorkerMessage::Cancelled).ok();
                 return;
             }
-        };
+
+            SizeCalculator::calculate(&mut root_node);
+
+            if worker_cancel_flag.load(Ordering::Relaxed) {
+                sender.send(ScanWorkerMessage::Cancelled).ok();
+                return;
+            }
+
+            let mut result_message = String::from("Scan completed");
+            let mut persistent = false;
+
+            let scan_id = if persist_to_database {
+                match Self::save_scan_to_database_from_worker(&db_path, &path, &root_node) {
+                    Ok(scan_id) => {
+                        persistent = true;
+                        result_message = format!("Scan completed and saved. scan_id = {}", scan_id);
+                        Some(scan_id)
+                    }
+
+                    Err(message) => {
+                        result_message =
+                            format!("Scan completed, but database save failed: {}", message);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            sender
+                .send(ScanWorkerMessage::Finished {
+                    root_node,
+                    scan_id,
+                    persistent,
+                    message: result_message,
+                })
+                .ok();
+        });
+
+        self.scan_receiver = Some(receiver);
+        self.scan_cancel_flag = Some(cancel_flag);
+    }
+
+    fn save_scan_to_database_from_worker(
+        db_path: &str,
+        path: &Path,
+        root_node: &FileNode,
+    ) -> Result<i64, String> {
+        let mut repository = DatabaseRepository::new(db_path)
+            .map_err(|error| format!("Database open failed: {}", error))?;
 
         let (files_count, dirs_count) = Self::count_nodes(root_node);
 
@@ -586,31 +672,86 @@ impl TuiApp {
             status: String::from("running"),
         };
 
-        let scan_id = match repository.save_scan(&scan) {
-            Ok(scan_id) => scan_id,
-            Err(_) => {
-                self.status_message = String::from("Scan completed, but save_scan failed");
-                return;
-            }
-        };
+        let scan_id = repository
+            .save_scan(&scan)
+            .map_err(|error| format!("save_scan failed: {}", error))?;
 
         let statistics = StatService::group_by_categories(root_node);
 
-        if repository.save_nodes(scan_id, root_node).is_err() {
-            self.status_message = String::from("Scan completed, but save_nodes failed");
+        repository
+            .save_nodes(scan_id, root_node)
+            .map_err(|error| format!("save_nodes failed: {}", error))?;
+
+        repository
+            .save_statistics(scan_id, &statistics)
+            .map_err(|error| format!("save_statistics failed: {}", error))?;
+
+        repository
+            .finish_scan(scan_id, "completed")
+            .map_err(|error| format!("finish_scan failed: {}", error))?;
+
+        Ok(scan_id)
+    }
+
+    pub fn cancel_scan(&mut self) {
+        if let Some(cancel_flag) = &self.scan_cancel_flag {
+            cancel_flag.store(true, Ordering::Relaxed);
+            self.status_message = String::from("Cancelling scan...");
+        }
+    }
+
+    pub fn tick(&mut self) {
+        if self.screen != AppScreen::Scanning {
             return;
         }
 
-        if repository.save_statistics(scan_id, &statistics).is_err() {
-            self.status_message = String::from("Scan completed, but save_statistics failed");
-            return;
+        self.scanning_dots = (self.scanning_dots + 1) % 4;
+
+        let message = self
+            .scan_receiver
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok());
+
+        match message {
+            Some(ScanWorkerMessage::Finished {
+                root_node,
+                scan_id,
+                persistent,
+                message,
+            }) => {
+                self.root_node = Some(root_node);
+                self.expanded_paths.clear();
+                self.selected_index = 0;
+
+                self.current_scan_id = scan_id;
+                self.current_is_full_persistent_scan = persistent;
+
+                self.sort_current_tree();
+                self.rebuild_rows();
+
+                self.scan_receiver = None;
+                self.scan_cancel_flag = None;
+
+                self.screen = AppScreen::FileTree;
+                self.status_message = message;
+            }
+
+            Some(ScanWorkerMessage::Failed(message)) => {
+                self.scan_receiver = None;
+                self.scan_cancel_flag = None;
+                self.screen = AppScreen::MainMenu;
+                self.status_message = message;
+            }
+
+            Some(ScanWorkerMessage::Cancelled) => {
+                self.scan_receiver = None;
+                self.scan_cancel_flag = None;
+                self.screen = AppScreen::MainMenu;
+                self.status_message = String::from("Scan cancelled");
+            }
+
+            None => {}
         }
-
-        repository.finish_scan(scan_id, "completed").ok();
-
-        self.current_scan_id = Some(scan_id);
-        self.current_is_full_persistent_scan = true;
-        self.status_message = format!("Scan completed and saved to database. scan_id = {}", scan_id);
     }
 
     pub fn toggle_selected_directory(&mut self) {
@@ -668,15 +809,11 @@ impl TuiApp {
             return;
         }
 
-        match DeleteService::delete_from_disk(&target.path, &target.node_type) {
-            Ok(_) => {}
-
-            Err(_) => {
-                self.status_message = String::from("Delete from disk failed");
-                self.delete_target = None;
-                self.screen = AppScreen::FileTree;
-                return;
-            }
+        if DeleteService::delete_from_disk(&target.path, &target.node_type).is_err() {
+            self.status_message = String::from("Delete from disk failed");
+            self.delete_target = None;
+            self.screen = AppScreen::FileTree;
+            return;
         }
 
         if let Some(root_node) = &mut self.root_node {
@@ -722,24 +859,17 @@ impl TuiApp {
             let (files_count, dirs_count) = Self::count_nodes(root_node);
 
             if repository
-                .replace_scan_data(
-                    scan_id,
-                    root_node,
-                    &statistics,
-                    files_count,
-                    dirs_count,
-                )
+                .replace_scan_data(scan_id, root_node, &statistics, files_count, dirs_count)
                 .is_err()
             {
                 self.status_message = String::from("Deleted from disk, but database update failed");
             }
-        } else {
-            if repository
-                .delete_path_from_scan(scan_id, deleted_path)
-                .is_err()
-            {
-                self.status_message = String::from("Deleted from disk, but database path delete failed");
-            }
+        } else if repository
+            .delete_path_from_scan(scan_id, deleted_path)
+            .is_err()
+        {
+            self.status_message =
+                String::from("Deleted from disk, but database path delete failed");
         }
     }
 
@@ -828,14 +958,9 @@ impl TuiApp {
         let mut files_count = 0;
         let mut dirs_count = 0;
 
-        match node.node_type {
-            NodeType::File | NodeType::Symlink => {
-                files_count += 1;
-            }
-
-            NodeType::Directory => {
-                dirs_count += 1;
-            }
+        match &node.node_type {
+            NodeType::File | NodeType::Symlink => files_count += 1,
+            NodeType::Directory => dirs_count += 1,
         }
 
         for child in &node.children {
@@ -845,5 +970,8 @@ impl TuiApp {
         }
 
         (files_count, dirs_count)
+    }
+    fn default_db_path() -> String {
+        format!("{}/data/disk_analyzer.db", env!("CARGO_MANIFEST_DIR"))
     }
 }

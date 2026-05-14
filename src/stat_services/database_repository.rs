@@ -1,5 +1,5 @@
 use crate::models::*;
-use rusqlite::{params, Connection, OptionalExtension, Result, Transaction};
+use rusqlite::{Connection, OptionalExtension, Result, Transaction, params};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -26,56 +26,26 @@ impl DatabaseRepository {
 
         let connection = Connection::open(database_path)?;
 
-        connection.execute("PRAGMA foreign_keys = ON;", [])?;
-        connection.execute("PRAGMA journal_mode = WAL;", [])?;
-        connection.execute("PRAGMA synchronous = NORMAL;", [])?;
-        connection.execute("PRAGMA temp_store = MEMORY;", [])?;
-        connection.execute("PRAGMA cache_size = -64000;", [])?;
+        connection.execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA cache_size = -64000;
+            ",
+        )?;
 
-        let schema = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/migrations/init.sql"));
+        let schema = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/migrations/init.sql"
+        ));
+
         connection.execute_batch(schema)?;
 
         Ok(Self { connection })
     }
 
-    pub fn find_latest_scan_by_root_path(
-            &self,
-            root_path: &str,
-        ) -> Result<Option<ScanSession>> {
-            self.connection
-                .query_row(
-                    "
-                    SELECT
-                        id,
-                        root_path,
-                        started_at,
-                        finished_at,
-                        total_size,
-                        files_count,
-                        dirs_count,
-                        status
-                    FROM scans
-                    WHERE root_path = ?1
-                    AND status = 'completed'
-                    ORDER BY started_at DESC, id DESC
-                    LIMIT 1
-                    ",
-                    params![root_path],
-                    |row| {
-                        Ok(ScanSession {
-                            id: Some(row.get(0)?),
-                            root_path: row.get(1)?,
-                            started_at: row.get(2)?,
-                            finished_at: row.get(3)?,
-                            total_size: row.get::<_, i64>(4)? as u64,
-                            files_count: row.get::<_, i64>(5)? as u64,
-                            dirs_count: row.get::<_, i64>(6)? as u64,
-                            status: row.get(7)?,
-                        })
-                    },
-                )
-                .optional()
-        }
     pub fn save_scan(&self, scan: &ScanSession) -> Result<i64> {
         self.connection.execute(
             "
@@ -148,6 +118,93 @@ impl DatabaseRepository {
             },
         )
     }
+
+    pub fn find_latest_scan_by_root_path(&self, root_path: &str) -> Result<Option<ScanSession>> {
+        let normalized_path = Self::normalize_path(root_path);
+
+        self.connection
+            .query_row(
+                "
+                SELECT
+                    id,
+                    root_path,
+                    started_at,
+                    finished_at,
+                    total_size,
+                    files_count,
+                    dirs_count,
+                    status
+                FROM scans
+                WHERE status = 'completed'
+                  AND (
+                        root_path = ?1
+                        OR root_path = ?2
+                        OR rtrim(root_path, '/') = rtrim(?2, '/')
+                  )
+                ORDER BY started_at DESC, id DESC
+                LIMIT 1
+                ",
+                params![root_path, normalized_path],
+                |row| {
+                    Ok(ScanSession {
+                        id: Some(row.get(0)?),
+                        root_path: row.get(1)?,
+                        started_at: row.get(2)?,
+                        finished_at: row.get(3)?,
+                        total_size: row.get::<_, i64>(4)? as u64,
+                        files_count: row.get::<_, i64>(5)? as u64,
+                        dirs_count: row.get::<_, i64>(6)? as u64,
+                        status: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn find_latest_scan_containing_path(&self, path: &str) -> Result<Option<ScanSession>> {
+        let normalized_path = Self::normalize_path(path);
+
+        self.connection
+            .query_row(
+                "
+                SELECT
+                    s.id,
+                    s.root_path,
+                    s.started_at,
+                    s.finished_at,
+                    s.total_size,
+                    s.files_count,
+                    s.dirs_count,
+                    s.status
+                FROM scans s
+                JOIN file_nodes f ON f.scan_id = s.id
+                WHERE s.status = 'completed'
+                  AND f.node_type = 'directory'
+                  AND (
+                        f.path = ?1
+                        OR f.path = ?2
+                        OR rtrim(f.path, '/') = rtrim(?2, '/')
+                  )
+                ORDER BY s.started_at DESC, s.id DESC
+                LIMIT 1
+                ",
+                params![path, normalized_path],
+                |row| {
+                    Ok(ScanSession {
+                        id: Some(row.get(0)?),
+                        root_path: row.get(1)?,
+                        started_at: row.get(2)?,
+                        finished_at: row.get(3)?,
+                        total_size: row.get::<_, i64>(4)? as u64,
+                        files_count: row.get::<_, i64>(5)? as u64,
+                        dirs_count: row.get::<_, i64>(6)? as u64,
+                        status: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
     pub fn save_nodes(&mut self, scan_id: i64, root: &FileNode) -> Result<()> {
         let tx = self.connection.transaction()?;
 
@@ -199,11 +256,7 @@ impl DatabaseRepository {
         Ok(current_id)
     }
 
-    pub fn save_statistics(
-        &mut self,
-        scan_id: i64,
-        statistics: &[FileStatistic],
-    ) -> Result<()> {
+    pub fn save_statistics(&mut self, scan_id: i64, statistics: &[FileStatistic]) -> Result<()> {
         let tx = self.connection.transaction()?;
 
         for stat in statistics {
@@ -232,11 +285,8 @@ impl DatabaseRepository {
 
         Ok(())
     }
-    pub fn replace_statistics(
-        &mut self,
-        scan_id: i64,
-        statistics: &[FileStatistic],
-    ) -> Result<()> {
+
+    pub fn replace_statistics(&mut self, scan_id: i64, statistics: &[FileStatistic]) -> Result<()> {
         self.connection.execute(
             "DELETE FROM file_statistics WHERE scan_id = ?1",
             params![scan_id],
@@ -253,7 +303,7 @@ impl DatabaseRepository {
         files_count: u64,
         dirs_count: u64,
     ) -> Result<()> {
-            self.connection.execute(
+        self.connection.execute(
             "DELETE FROM file_nodes WHERE scan_id = ?1",
             params![scan_id],
         )?;
@@ -266,12 +316,7 @@ impl DatabaseRepository {
         self.save_nodes(scan_id, root)?;
         self.save_statistics(scan_id, statistics)?;
 
-        self.update_scan_summary(
-            scan_id,
-            root.size,
-            files_count,
-            dirs_count,
-        )?;
+        self.update_scan_summary(scan_id, root.size, files_count, dirs_count)?;
 
         Ok(())
     }
@@ -302,78 +347,42 @@ impl DatabaseRepository {
         Ok(())
     }
 
-    pub fn delete_path_from_scan(
-        &self,
-        scan_id: i64,
-        path: &str,
-    ) -> Result<()> {
-        let like_pattern = format!("{}/%", path.trim_end_matches('/'));
+    pub fn delete_path_from_scan(&self, scan_id: i64, path: &str) -> Result<()> {
+        let normalized_path = Self::normalize_path(path);
+        let like_pattern = format!("{}/%", normalized_path.trim_end_matches('/'));
 
         self.connection.execute(
             "
             DELETE FROM file_nodes
             WHERE scan_id = ?1
-              AND (path = ?2 OR path LIKE ?3)
+              AND (
+                    path = ?2
+                    OR path = ?3
+                    OR path LIKE ?4
+              )
             ",
-            params![scan_id, path, like_pattern],
+            params![scan_id, path, normalized_path, like_pattern],
         )?;
 
         Ok(())
     }
 
-    pub fn find_latest_scan_containing_path(
-        &self,
-        path: &str,
-    ) -> Result<Option<ScanSession>> {
-        self.connection
-            .query_row(
-                "
-                SELECT
-                    s.id,
-                    s.root_path,
-                    s.started_at,
-                    s.finished_at,
-                    s.total_size,
-                    s.files_count,
-                    s.dirs_count,
-                    s.status
-                FROM scans s
-                JOIN file_nodes f ON f.scan_id = s.id
-                WHERE f.path = ?1
-                  AND f.node_type = 'directory'
-                ORDER BY s.started_at DESC, s.id DESC
-                LIMIT 1
-                ",
-                params![path],
-                |row| {
-                    Ok(ScanSession {
-                        id: Some(row.get(0)?),
-                        root_path: row.get(1)?,
-                        started_at: row.get(2)?,
-                        finished_at: row.get(3)?,
-                        total_size: row.get::<_, i64>(4)? as u64,
-                        files_count: row.get::<_, i64>(5)? as u64,
-                        dirs_count: row.get::<_, i64>(6)? as u64,
-                        status: row.get(7)?,
-                    })
-                },
-            )
-            .optional()
-    }
+    pub fn load_subtree_from_path(&self, scan_id: i64, root_path: &str) -> Result<FileNode> {
+        let normalized_path = Self::normalize_path(root_path);
 
-    pub fn load_subtree_from_path(
-        &self,
-        scan_id: i64,
-        root_path: &str,
-    ) -> Result<FileNode> {
         let root_id: i64 = self.connection.query_row(
             "
             SELECT id
             FROM file_nodes
-            WHERE scan_id = ?1 AND path = ?2
+            WHERE scan_id = ?1
+              AND (
+                    path = ?2
+                    OR path = ?3
+                    OR rtrim(path, '/') = rtrim(?3, '/')
+              )
             LIMIT 1
             ",
-            params![scan_id, root_path],
+            params![scan_id, root_path, normalized_path],
             |row| row.get(0),
         )?;
 
@@ -433,10 +442,7 @@ impl DatabaseRepository {
         nodes_by_id: &HashMap<i64, DbFileNode>,
         children_by_parent: &HashMap<Option<i64>, Vec<i64>>,
     ) -> FileNode {
-        let db_node = nodes_by_id
-            .get(&node_id)
-            .expect("Node must exist")
-            .clone();
+        let db_node = nodes_by_id.get(&node_id).expect("Node must exist").clone();
 
         let child_ids = children_by_parent
             .get(&Some(node_id))
@@ -472,6 +478,14 @@ impl DatabaseRepository {
             "directory" => NodeType::Directory,
             "symlink" => NodeType::Symlink,
             _ => NodeType::File,
+        }
+    }
+
+    fn normalize_path(path: &str) -> String {
+        if path == "/" {
+            String::from("/")
+        } else {
+            path.trim_end_matches('/').to_string()
         }
     }
 }

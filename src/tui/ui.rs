@@ -2,11 +2,11 @@ use crate::models::{FileCategory, NodeType};
 use crate::tui::app::{AppScreen, TreeRow, TuiApp};
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
-    Frame,
 };
 
 pub fn render(frame: &mut Frame, app: &TuiApp) {
@@ -16,38 +16,57 @@ pub fn render(frame: &mut Frame, app: &TuiApp) {
         AppScreen::PathInput => render_path_input(frame, app),
         AppScreen::SavedDirectoryChoice => render_saved_directory_choice(frame, app),
         AppScreen::DiskSelection => render_disk_selection(frame, app),
+        AppScreen::Scanning => render_scanning(frame, app),
         AppScreen::FileTree => render_file_tree_screen(frame, app),
         AppScreen::DeleteConfirm => render_delete_confirm(frame, app),
     }
 }
 
 fn render_main_menu(frame: &mut Frame, app: &TuiApp) {
+    let hidden_status = if app.show_hidden() { "on" } else { "off" };
+
     render_list_screen(
         frame,
         "Disk Analyzer",
         app.menu_items(),
         app.menu_index(),
-        "Enter - select | q / Esc - quit",
+        &format!(
+            "Enter - select | h - hidden: {} | q / Esc - quit",
+            hidden_status
+        ),
     );
 }
 
 fn render_directory_scan_menu(frame: &mut Frame, app: &TuiApp) {
+    let hidden_status = if app.show_hidden() { "on" } else { "off" };
+
     render_list_screen(
         frame,
         "Scan directory",
         app.directory_menu_items(),
         app.directory_menu_index(),
-        "Enter - select | Esc - back",
+        &format!(
+            "Enter - select | h - hidden: {} | Esc - back",
+            hidden_status
+        ),
     );
 }
 
 fn render_saved_directory_choice(frame: &mut Frame, app: &TuiApp) {
+    let hidden_status = if app.show_hidden() { "on" } else { "off" };
+
     let title = match (app.pending_directory_path(), app.pending_scan()) {
         (Some(path), Some(scan)) => {
             if app.pending_is_disk_scan() {
-                format!("Saved disk scan found | last scan: {} | {}", scan.started_at, path)
+                format!(
+                    "Saved disk scan found | last scan: {} | {}",
+                    scan.started_at, path
+                )
             } else {
-                format!("Saved directory version found | last scan: {} | {}", scan.started_at, path)
+                format!(
+                    "Saved directory version found | last scan: {} | {}",
+                    scan.started_at, path
+                )
             }
         }
         _ => String::from("Saved version found"),
@@ -58,7 +77,10 @@ fn render_saved_directory_choice(frame: &mut Frame, app: &TuiApp) {
         &title,
         app.saved_choice_items(),
         app.saved_choice_index(),
-        "Enter - select | Esc - back",
+        &format!(
+            "Enter - select | h - hidden: {} | Esc - back",
+            hidden_status
+        ),
     );
 }
 
@@ -71,10 +93,7 @@ fn render_list_screen(
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(5),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
         .split(frame.area());
 
     let list_items: Vec<ListItem> = items
@@ -92,17 +111,13 @@ fn render_list_screen(
 
     frame.render_stateful_widget(list, layout[0], &mut state);
 
-    let help = Paragraph::new(help)
-        .block(Block::default().title("Help").borders(Borders::ALL));
+    let help = Paragraph::new(help).block(Block::default().title("Help").borders(Borders::ALL));
 
     frame.render_widget(help, layout[1]);
 }
 
 fn render_path_input(frame: &mut Frame, app: &TuiApp) {
-    let text = format!(
-        "Enter directory path:\n\n{}",
-        app.input_path()
-    );
+    let text = format!("Enter directory path:\n\n{}", app.input_path());
 
     let paragraph = Paragraph::new(text)
         .block(Block::default().title("Path input").borders(Borders::ALL))
@@ -112,7 +127,10 @@ fn render_path_input(frame: &mut Frame, app: &TuiApp) {
 }
 
 fn render_disk_selection(frame: &mut Frame, app: &TuiApp) {
-    let area = frame.area();
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .split(frame.area());
 
     let items: Vec<ListItem> = app
         .disk_rows()
@@ -142,24 +160,27 @@ fn render_disk_selection(frame: &mut Frame, app: &TuiApp) {
         state.select(Some(app.disk_index()));
     }
 
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(list, layout[0], &mut state);
+
+    let hidden_status = if app.show_hidden() { "on" } else { "off" };
+    let help = Paragraph::new(format!(
+        "Enter - scan selected disk | h - hidden: {} | Esc - back | q - quit",
+        hidden_status
+    ))
+    .block(Block::default().title("Help").borders(Borders::ALL));
+
+    frame.render_widget(help, layout[1]);
 }
 
 fn render_file_tree_screen(frame: &mut Frame, app: &TuiApp) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(5),
-            Constraint::Length(4),
-        ])
+        .constraints([Constraint::Min(5), Constraint::Length(4)])
         .split(frame.area());
 
     let content_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(65),
-            Constraint::Percentage(35),
-        ])
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(main_layout[0]);
 
     render_tree(frame, app, content_layout[0]);
@@ -209,8 +230,8 @@ fn render_help(frame: &mut Frame, app: &TuiApp, area: Rect) {
         system_dirs_status,
         app.status_message()
     );
-    let help = Paragraph::new(help_text)
-        .block(Block::default().title("Help").borders(Borders::ALL));
+    let help =
+        Paragraph::new(help_text).block(Block::default().title("Help").borders(Borders::ALL));
 
     frame.render_widget(help, area);
 }
@@ -225,7 +246,11 @@ fn render_delete_confirm(frame: &mut Frame, app: &TuiApp) {
     };
 
     let paragraph = Paragraph::new(text)
-        .block(Block::default().title("Confirm delete").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Confirm delete")
+                .borders(Borders::ALL),
+        )
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, frame.area());
@@ -267,10 +292,7 @@ fn build_info_text(row: &TreeRow) -> String {
         NodeType::Symlink => "Symlink",
     };
 
-    let extension = row
-        .extension
-        .clone()
-        .unwrap_or_else(|| String::from("-"));
+    let extension = row.extension.clone().unwrap_or_else(|| String::from("-"));
 
     let category = match row.category {
         Some(category) => category_to_string(category),
@@ -278,11 +300,7 @@ fn build_info_text(row: &TreeRow) -> String {
     };
 
     let expanded = if row.node_type == NodeType::Directory {
-        if row.is_expanded {
-            "yes"
-        } else {
-            "no"
-        }
+        if row.is_expanded { "yes" } else { "no" }
     } else {
         "-"
     };
@@ -320,4 +338,20 @@ fn format_size(size: u64) -> String {
     } else {
         format!("{:.0} B", size)
     }
+}
+
+fn render_scanning(frame: &mut Frame, app: &TuiApp) {
+    let dots = ".".repeat(app.scanning_dots());
+
+    let text = format!(
+        "Scanning{}\n\n{}\n\nEsc - stop scanning\nq - stop and quit",
+        dots,
+        app.status_message()
+    );
+
+    let paragraph = Paragraph::new(text)
+        .block(Block::default().title("Scanning").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, frame.area());
 }

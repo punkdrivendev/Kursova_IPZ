@@ -2,6 +2,7 @@ use crate::models::{FileNode, NodeType};
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Scanner {
     pub show_hidden: bool,
@@ -36,6 +37,15 @@ impl Scanner {
     }
 
     pub fn scan(&self, path: &Path) -> Option<FileNode> {
+        let cancel_flag = AtomicBool::new(false);
+        self.scan_with_cancel(path, &cancel_flag)
+    }
+
+    pub fn scan_with_cancel(&self, path: &Path, cancel_flag: &AtomicBool) -> Option<FileNode> {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return None;
+        }
+
         if self.should_skip_path(path) {
             return None;
         }
@@ -108,7 +118,13 @@ impl Scanner {
 
             let children: Vec<FileNode> = child_paths
                 .par_iter()
-                .filter_map(|child_path| self.scan(child_path))
+                .filter_map(|child_path| {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        None
+                    } else {
+                        self.scan_with_cancel(child_path, cancel_flag)
+                    }
+                })
                 .collect();
 
             return Some(FileNode {
@@ -133,7 +149,7 @@ impl Scanner {
             Err(_) => return None,
         };
 
-        let paths: Vec<PathBuf> = entries
+        let paths = entries
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .collect();

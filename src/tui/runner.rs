@@ -5,11 +5,9 @@ use crate::tui::ui;
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
-    terminal::{
-        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{io, path::PathBuf, time::Duration};
 
 pub fn run_tui() -> io::Result<()> {
@@ -23,7 +21,6 @@ pub fn run_app(mut app: TuiApp) -> io::Result<()> {
     enable_raw_mode()?;
 
     let mut stdout = io::stdout();
-
     execute!(stdout, EnterAlternateScreen)?;
 
     let backend = CrosstermBackend::new(stdout);
@@ -32,9 +29,7 @@ pub fn run_app(mut app: TuiApp) -> io::Result<()> {
     let result = run_event_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;
-
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-
     terminal.show_cursor()?;
 
     result
@@ -45,6 +40,8 @@ fn run_event_loop(
     app: &mut TuiApp,
 ) -> io::Result<()> {
     loop {
+        app.tick();
+
         terminal.draw(|frame| {
             ui::render(frame, app);
         })?;
@@ -68,8 +65,9 @@ fn handle_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
         AppScreen::MainMenu => handle_main_menu_key(app, key_code)?,
         AppScreen::DirectoryScanMenu => handle_directory_scan_menu_key(app, key_code)?,
         AppScreen::PathInput => handle_path_input_key(app, key_code)?,
-        AppScreen::SavedDirectoryChoice => handle_saved_directory_choice_key(app, key_code)?,
+        AppScreen::SavedDirectoryChoice => handle_saved_choice_key(app, key_code)?,
         AppScreen::DiskSelection => handle_disk_selection_key(app, key_code)?,
+        AppScreen::Scanning => handle_scanning_key(app, key_code)?,
         AppScreen::FileTree => handle_file_tree_key(app, key_code)?,
         AppScreen::DeleteConfirm => handle_delete_confirm_key(app, key_code)?,
     }
@@ -80,9 +78,8 @@ fn handle_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
 fn handle_main_menu_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
     match key_code {
         KeyCode::Char('q') | KeyCode::Esc => app.quit(),
-
+        KeyCode::Char('h') => app.toggle_hidden_mode(),
         KeyCode::Down | KeyCode::Char('j') => app.next(),
-
         KeyCode::Up | KeyCode::Char('k') => app.previous(),
 
         KeyCode::Enter => match app.menu_index() {
@@ -99,15 +96,11 @@ fn handle_main_menu_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
     Ok(())
 }
 
-fn handle_directory_scan_menu_key(
-    app: &mut TuiApp,
-    key_code: KeyCode,
-) -> io::Result<()> {
+fn handle_directory_scan_menu_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
     match key_code {
         KeyCode::Esc => app.set_screen(AppScreen::MainMenu),
-
+        KeyCode::Char('h') => app.toggle_hidden_mode(),
         KeyCode::Down | KeyCode::Char('j') => app.next(),
-
         KeyCode::Up | KeyCode::Char('k') => app.previous(),
 
         KeyCode::Enter => match app.directory_menu_index() {
@@ -155,21 +148,32 @@ fn handle_path_input_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> 
     Ok(())
 }
 
-fn handle_saved_directory_choice_key(
-    app: &mut TuiApp,
-    key_code: KeyCode,
-) -> io::Result<()> {
+fn handle_saved_choice_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
     match key_code {
-        KeyCode::Esc => app.set_screen(AppScreen::DirectoryScanMenu),
+        KeyCode::Esc => {
+            if app.pending_is_disk_scan() {
+                app.set_screen(AppScreen::DiskSelection);
+            } else {
+                app.set_screen(AppScreen::DirectoryScanMenu);
+            }
+        }
 
+        KeyCode::Char('h') => app.toggle_hidden_mode(),
         KeyCode::Down | KeyCode::Char('j') => app.next(),
-
         KeyCode::Up | KeyCode::Char('k') => app.previous(),
 
         KeyCode::Enter => match app.saved_choice_index() {
             0 => app.open_saved_directory_version(),
             1 => app.scan_pending_path_again(),
-            2 => app.set_screen(AppScreen::DirectoryScanMenu),
+
+            2 => {
+                if app.pending_is_disk_scan() {
+                    app.set_screen(AppScreen::DiskSelection);
+                } else {
+                    app.set_screen(AppScreen::DirectoryScanMenu);
+                }
+            }
+
             _ => {}
         },
 
@@ -182,18 +186,30 @@ fn handle_saved_directory_choice_key(
 fn handle_disk_selection_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
     match key_code {
         KeyCode::Char('q') => app.quit(),
-
         KeyCode::Esc => app.set_screen(AppScreen::MainMenu),
-
+        KeyCode::Char('h') => app.toggle_hidden_mode(),
         KeyCode::Down | KeyCode::Char('j') => app.next(),
-
         KeyCode::Up | KeyCode::Char('k') => app.previous(),
 
         KeyCode::Enter => {
             if let Some(mount_point) = app.selected_disk_mount_point() {
-                let path = PathBuf::from(mount_point);
-                app.request_disk_scan(path);
+                app.request_disk_scan(PathBuf::from(mount_point));
             }
+        }
+
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn handle_scanning_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
+    match key_code {
+        KeyCode::Esc => app.cancel_scan(),
+
+        KeyCode::Char('q') => {
+            app.cancel_scan();
+            app.quit();
         }
 
         _ => {}
@@ -205,25 +221,15 @@ fn handle_disk_selection_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<
 fn handle_file_tree_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
     match key_code {
         KeyCode::Char('q') => app.quit(),
-
         KeyCode::Esc => app.set_screen(AppScreen::MainMenu),
-
         KeyCode::Down | KeyCode::Char('j') => app.next(),
-
         KeyCode::Up | KeyCode::Char('k') => app.previous(),
-
         KeyCode::Enter => app.toggle_selected_directory(),
-
         KeyCode::Char('d') => app.request_delete_selected(),
-
         KeyCode::Char('n') => app.set_sort_mode(SortMode::Name),
-
         KeyCode::Char('s') => app.set_sort_mode(SortMode::Size),
-
         KeyCode::Char('t') => app.set_sort_mode(SortMode::Type),
-
         KeyCode::Char('h') => app.toggle_hidden_mode(),
-
         _ => {}
     }
 
@@ -233,9 +239,7 @@ fn handle_file_tree_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
 fn handle_delete_confirm_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
     match key_code {
         KeyCode::Esc => app.cancel_delete(),
-
         KeyCode::Enter => app.confirm_delete(),
-
         _ => {}
     }
 
