@@ -915,15 +915,30 @@ impl TuiApp {
                 return;
             }
 
-            Self::remove_node_by_path(&mut root_node, &target.path);
-            SizeCalculator::calculate(&mut root_node);
+            let Some(deleted_node) =
+                Self::remove_node_by_path_and_update_sizes(&mut root_node, &target.path)
+            else {
+                sender
+                    .send(DeleteWorkerMessage::Failed {
+                        root_node,
+                        message: String::from("Deleted from disk, but node was not found in tree"),
+                    })
+                    .ok();
+                return;
+            };
+
+            let deleted_statistics = StatService::group_by_categories(&deleted_node);
+            let (deleted_files_count, deleted_dirs_count) = Self::count_nodes(&deleted_node);
 
             let message = match Self::update_database_after_delete_from_worker(
                 &db_path,
                 scan_id,
                 current_is_full_persistent_scan,
                 &target.path,
-                &root_node,
+                deleted_node.size,
+                deleted_files_count,
+                deleted_dirs_count,
+                &deleted_statistics,
             ) {
                 Ok(()) => format!("Deleted: {}", target.path),
                 Err(message) => format!("Deleted from disk, but {}", message),
@@ -946,7 +961,10 @@ impl TuiApp {
         scan_id: Option<i64>,
         current_is_full_persistent_scan: bool,
         deleted_path: &str,
-        root_node: &FileNode,
+        deleted_size: u64,
+        deleted_files_count: u64,
+        deleted_dirs_count: u64,
+        deleted_statistics: &[FileStatistic],
     ) -> Result<(), String> {
         let Some(scan_id) = scan_id else {
             return Ok(());
@@ -960,17 +978,14 @@ impl TuiApp {
         };
 
         if current_is_full_persistent_scan {
-            let statistics = StatService::group_by_categories(root_node);
-            let (files_count, dirs_count) = Self::count_nodes(root_node);
-
             repository
                 .apply_delete_to_full_scan(
                     scan_id,
                     deleted_path,
-                    root_node,
-                    &statistics,
-                    files_count,
-                    dirs_count,
+                    deleted_size,
+                    deleted_files_count,
+                    deleted_dirs_count,
+                    deleted_statistics,
                 )
                 .map_err(|error| format!("database update failed: {}", error))?;
         } else {
@@ -982,22 +997,29 @@ impl TuiApp {
         Ok(())
     }
 
-    fn remove_node_by_path(node: &mut FileNode, target_path: &str) -> bool {
-        let old_len = node.children.len();
+    fn remove_node_by_path_and_update_sizes(
+        node: &mut FileNode,
+        target_path: &str,
+    ) -> Option<FileNode> {
+        let child_index = node
+            .children
+            .iter()
+            .position(|child| child.path == target_path);
 
-        node.children.retain(|child| child.path != target_path);
-
-        if node.children.len() != old_len {
-            return true;
+        if let Some(index) = child_index {
+            let removed = node.children.remove(index);
+            node.size = node.size.saturating_sub(removed.size);
+            return Some(removed);
         }
 
         for child in &mut node.children {
-            if Self::remove_node_by_path(child, target_path) {
-                return true;
+            if let Some(removed) = Self::remove_node_by_path_and_update_sizes(child, target_path) {
+                node.size = node.size.saturating_sub(removed.size);
+                return Some(removed);
             }
         }
 
-        false
+        None
     }
 
     pub fn set_sort_mode(&mut self, sort_mode: SortMode) {

@@ -212,21 +212,35 @@ fn test_apply_delete_to_full_scan_updates_database_without_replacing_scan() {
 
     repository.save_nodes(scan_id, &original_root).unwrap();
 
-    let updated_root = FileNode {
-        children: vec![original_root.children[0].clone()],
-        size: 100,
-        ..original_root
-    };
-
-    let statistics = vec![FileStatistic {
-        category: FileCategory::Documents,
+    let deleted_statistics = vec![FileStatistic {
+        category: FileCategory::Video,
         file_count: 1,
-        total_size: 100,
+        total_size: 200,
         percentage: 100.0,
     }];
 
     repository
-        .apply_delete_to_full_scan(scan_id, "/test/remove", &updated_root, &statistics, 1, 1)
+        .save_statistics(
+            scan_id,
+            &[
+                FileStatistic {
+                    category: FileCategory::Documents,
+                    file_count: 1,
+                    total_size: 100,
+                    percentage: 33.33,
+                },
+                FileStatistic {
+                    category: FileCategory::Video,
+                    file_count: 1,
+                    total_size: 200,
+                    percentage: 66.67,
+                },
+            ],
+        )
+        .unwrap();
+
+    repository
+        .apply_delete_to_full_scan(scan_id, "/test/remove", 200, 1, 1, &deleted_statistics)
         .unwrap();
 
     let connection = Connection::open(&db_path).unwrap();
@@ -255,9 +269,18 @@ fn test_apply_delete_to_full_scan_updates_database_without_replacing_scan() {
         )
         .unwrap();
 
+    let statistics_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM file_statistics WHERE scan_id = ?1",
+            [scan_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
     assert_eq!(removed_count, 0);
     assert_eq!(root_size, 100);
     assert_eq!(summary, (100, 1, 1));
+    assert_eq!(statistics_count, 1);
 
     fs::remove_file(db_path).ok();
 }

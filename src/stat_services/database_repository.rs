@@ -381,10 +381,10 @@ impl DatabaseRepository {
         &mut self,
         scan_id: i64,
         deleted_path: &str,
-        root: &FileNode,
-        statistics: &[FileStatistic],
-        files_count: u64,
-        dirs_count: u64,
+        deleted_size: u64,
+        deleted_files_count: u64,
+        deleted_dirs_count: u64,
+        deleted_statistics: &[FileStatistic],
     ) -> Result<()> {
         let normalized_path = Self::normalize_path(deleted_path);
         let like_pattern = format!("{}/%", normalized_path.trim_end_matches('/'));
@@ -403,28 +403,69 @@ impl DatabaseRepository {
             params![scan_id, deleted_path, normalized_path, like_pattern],
         )?;
 
-        Self::update_node_sizes_tx(&tx, scan_id, root)?;
+        Self::subtract_size_from_ancestor_nodes_tx(&tx, scan_id, deleted_path, deleted_size)?;
+
+        for statistic in deleted_statistics {
+            tx.execute(
+                "
+                UPDATE file_statistics
+                SET files_count = MAX(files_count - ?1, 0),
+                    total_size = MAX(total_size - ?2, 0)
+                WHERE scan_id = ?3 AND category = ?4
+                ",
+                params![
+                    statistic.file_count as i64,
+                    statistic.total_size as i64,
+                    scan_id,
+                    statistic.category.as_str(),
+                ],
+            )?;
+        }
 
         tx.execute(
-            "DELETE FROM file_statistics WHERE scan_id = ?1",
+            "
+            DELETE FROM file_statistics
+            WHERE scan_id = ?1
+              AND files_count <= 0
+              AND total_size <= 0
+            ",
             params![scan_id],
         )?;
-        Self::save_statistics_tx(&tx, scan_id, statistics)?;
 
         tx.execute(
             "
             UPDATE scans
-            SET total_size = ?1,
-                files_count = ?2,
-                dirs_count = ?3
+            SET total_size = MAX(total_size - ?1, 0),
+                files_count = MAX(files_count - ?2, 0),
+                dirs_count = MAX(dirs_count - ?3, 0)
             WHERE id = ?4
             ",
             params![
-                root.size as i64,
-                files_count as i64,
-                dirs_count as i64,
+                deleted_size as i64,
+                deleted_files_count as i64,
+                deleted_dirs_count as i64,
                 scan_id,
             ],
+        )?;
+
+        tx.execute(
+            "
+            UPDATE file_statistics
+            SET percentage = CASE
+                WHEN (
+                    SELECT COALESCE(SUM(total_size), 0)
+                    FROM file_statistics
+                    WHERE scan_id = ?1
+                ) = 0 THEN 0
+                ELSE total_size * 100.0 / (
+                    SELECT COALESCE(SUM(total_size), 0)
+                    FROM file_statistics
+                    WHERE scan_id = ?1
+                )
+            END
+            WHERE scan_id = ?1
+            ",
+            params![scan_id],
         )?;
 
         tx.commit()?;
@@ -432,18 +473,27 @@ impl DatabaseRepository {
         Ok(())
     }
 
-    fn update_node_sizes_tx(tx: &Transaction<'_>, scan_id: i64, node: &FileNode) -> Result<()> {
-        tx.execute(
-            "
-            UPDATE file_nodes
-            SET size = ?1
-            WHERE scan_id = ?2 AND path = ?3
-            ",
-            params![node.size as i64, scan_id, node.path],
-        )?;
+    fn subtract_size_from_ancestor_nodes_tx(
+        tx: &Transaction<'_>,
+        scan_id: i64,
+        deleted_path: &str,
+        deleted_size: u64,
+    ) -> Result<()> {
+        let mut current = Path::new(deleted_path).parent();
 
-        for child in &node.children {
-            Self::update_node_sizes_tx(tx, scan_id, child)?;
+        while let Some(path) = current {
+            let path_string = path.to_string_lossy().to_string();
+
+            tx.execute(
+                "
+                UPDATE file_nodes
+                SET size = MAX(size - ?1, 0)
+                WHERE scan_id = ?2 AND path = ?3
+                ",
+                params![deleted_size as i64, scan_id, path_string],
+            )?;
+
+            current = path.parent();
         }
 
         Ok(())
