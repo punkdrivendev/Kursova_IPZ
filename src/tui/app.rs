@@ -23,6 +23,7 @@ pub enum AppScreen {
     SavedDirectoryChoice,
     DiskSelection,
     Scanning,
+    Deleting,
     FileTree,
     DeleteConfirm,
 }
@@ -36,6 +37,18 @@ enum ScanWorkerMessage {
     },
     Failed(String),
     Cancelled,
+}
+
+enum DeleteWorkerMessage {
+    Finished {
+        root_node: FileNode,
+        deleted_path: String,
+        message: String,
+    },
+    Failed {
+        root_node: FileNode,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +137,9 @@ pub struct TuiApp {
     scan_receiver: Option<Receiver<ScanWorkerMessage>>,
     scan_cancel_flag: Option<Arc<AtomicBool>>,
     scanning_dots: usize,
+
+    delete_receiver: Option<Receiver<DeleteWorkerMessage>>,
+    deleting_dots: usize,
 }
 
 impl TuiApp {
@@ -186,6 +202,9 @@ impl TuiApp {
             scan_receiver: None,
             scan_cancel_flag: None,
             scanning_dots: 0,
+
+            delete_receiver: None,
+            deleting_dots: 0,
         }
     }
 
@@ -291,6 +310,10 @@ impl TuiApp {
         self.scanning_dots
     }
 
+    pub fn deleting_dots(&self) -> usize {
+        self.deleting_dots
+    }
+
     pub fn next(&mut self) {
         match self.screen {
             AppScreen::MainMenu => {
@@ -323,7 +346,10 @@ impl TuiApp {
                 }
             }
 
-            AppScreen::PathInput | AppScreen::DeleteConfirm | AppScreen::Scanning => {}
+            AppScreen::PathInput
+            | AppScreen::DeleteConfirm
+            | AppScreen::Scanning
+            | AppScreen::Deleting => {}
         }
     }
 
@@ -359,7 +385,10 @@ impl TuiApp {
                 }
             }
 
-            AppScreen::PathInput | AppScreen::DeleteConfirm | AppScreen::Scanning => {}
+            AppScreen::PathInput
+            | AppScreen::DeleteConfirm
+            | AppScreen::Scanning
+            | AppScreen::Deleting => {}
         }
     }
 
@@ -701,10 +730,14 @@ impl TuiApp {
     }
 
     pub fn tick(&mut self) {
-        if self.screen != AppScreen::Scanning {
-            return;
+        match self.screen {
+            AppScreen::Scanning => self.tick_scan(),
+            AppScreen::Deleting => self.tick_delete(),
+            _ => {}
         }
+    }
 
+    fn tick_scan(&mut self) {
         self.scanning_dots = (self.scanning_dots + 1) % 4;
 
         let message = self
@@ -748,6 +781,48 @@ impl TuiApp {
                 self.scan_cancel_flag = None;
                 self.screen = AppScreen::MainMenu;
                 self.status_message = String::from("Scan cancelled");
+            }
+
+            None => {}
+        }
+    }
+
+    fn tick_delete(&mut self) {
+        self.deleting_dots = (self.deleting_dots + 1) % 4;
+
+        let message = self
+            .delete_receiver
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok());
+
+        match message {
+            Some(DeleteWorkerMessage::Finished {
+                root_node,
+                deleted_path,
+                message,
+            }) => {
+                self.root_node = Some(root_node);
+                self.expanded_paths.remove(&deleted_path);
+
+                self.sort_current_tree();
+                self.rebuild_rows();
+
+                if self.selected_index >= self.rows.len() {
+                    self.selected_index = self.rows.len().saturating_sub(1);
+                }
+
+                self.delete_receiver = None;
+                self.delete_target = None;
+                self.screen = AppScreen::FileTree;
+                self.status_message = message;
+            }
+
+            Some(DeleteWorkerMessage::Failed { root_node, message }) => {
+                self.root_node = Some(root_node);
+                self.delete_receiver = None;
+                self.delete_target = None;
+                self.screen = AppScreen::FileTree;
+                self.status_message = message;
             }
 
             None => {}
@@ -809,52 +884,82 @@ impl TuiApp {
             return;
         }
 
-        if DeleteService::delete_from_disk(&target.path, &target.node_type).is_err() {
-            self.status_message = String::from("Delete from disk failed");
+        let Some(root_node) = self.root_node.take() else {
+            self.status_message = String::from("No scanned tree loaded");
             self.delete_target = None;
             self.screen = AppScreen::FileTree;
             return;
-        }
-
-        if let Some(root_node) = &mut self.root_node {
-            Self::remove_node_by_path(root_node, &target.path);
-            SizeCalculator::calculate(root_node);
-        }
-
-        self.expanded_paths.remove(&target.path);
-
-        self.sort_current_tree();
-        self.rebuild_rows();
-
-        if self.selected_index >= self.rows.len() {
-            self.selected_index = self.rows.len().saturating_sub(1);
-        }
-
-        self.status_message = match self.update_database_after_delete(&target.path) {
-            Ok(()) => format!("Deleted: {}", target.path),
-            Err(message) => format!("Deleted from disk, but {}", message),
         };
-        self.delete_target = None;
-        self.screen = AppScreen::FileTree;
+
+        self.start_delete_async(target, root_node);
     }
 
-    fn update_database_after_delete(&mut self, deleted_path: &str) -> Result<(), String> {
-        let Some(scan_id) = self.current_scan_id else {
+    fn start_delete_async(&mut self, target: TreeRow, mut root_node: FileNode) {
+        self.status_message = format!("Deleting: {}", target.path);
+        self.screen = AppScreen::Deleting;
+        self.deleting_dots = 0;
+
+        let (sender, receiver) = mpsc::channel();
+        let db_path = self.db_path.clone();
+        let scan_id = self.current_scan_id;
+        let current_is_full_persistent_scan = self.current_is_full_persistent_scan;
+
+        thread::spawn(move || {
+            if let Err(error) = DeleteService::delete_from_disk(&target.path, &target.node_type) {
+                sender
+                    .send(DeleteWorkerMessage::Failed {
+                        root_node,
+                        message: format!("Delete from disk failed: {}", error),
+                    })
+                    .ok();
+                return;
+            }
+
+            Self::remove_node_by_path(&mut root_node, &target.path);
+            SizeCalculator::calculate(&mut root_node);
+
+            let message = match Self::update_database_after_delete_from_worker(
+                &db_path,
+                scan_id,
+                current_is_full_persistent_scan,
+                &target.path,
+                &root_node,
+            ) {
+                Ok(()) => format!("Deleted: {}", target.path),
+                Err(message) => format!("Deleted from disk, but {}", message),
+            };
+
+            sender
+                .send(DeleteWorkerMessage::Finished {
+                    root_node,
+                    deleted_path: target.path,
+                    message,
+                })
+                .ok();
+        });
+
+        self.delete_receiver = Some(receiver);
+    }
+
+    fn update_database_after_delete_from_worker(
+        db_path: &str,
+        scan_id: Option<i64>,
+        current_is_full_persistent_scan: bool,
+        deleted_path: &str,
+        root_node: &FileNode,
+    ) -> Result<(), String> {
+        let Some(scan_id) = scan_id else {
             return Ok(());
         };
 
-        let mut repository = match DatabaseRepository::new(&self.db_path) {
+        let mut repository = match DatabaseRepository::new(db_path) {
             Ok(repository) => repository,
             Err(_) => {
                 return Err(String::from("database open failed"));
             }
         };
 
-        if self.current_is_full_persistent_scan {
-            let Some(root_node) = &self.root_node else {
-                return Ok(());
-            };
-
+        if current_is_full_persistent_scan {
             let statistics = StatService::group_by_categories(root_node);
             let (files_count, dirs_count) = Self::count_nodes(root_node);
 

@@ -5,9 +5,9 @@ use crate::tui::ui;
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, path::PathBuf, time::Duration};
 
 pub fn run_tui() -> io::Result<()> {
@@ -68,6 +68,7 @@ fn handle_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
         AppScreen::SavedDirectoryChoice => handle_saved_choice_key(app, key_code)?,
         AppScreen::DiskSelection => handle_disk_selection_key(app, key_code)?,
         AppScreen::Scanning => handle_scanning_key(app, key_code)?,
+        AppScreen::Deleting => handle_deleting_key(app, key_code)?,
         AppScreen::FileTree => handle_file_tree_key(app, key_code)?,
         AppScreen::DeleteConfirm => handle_delete_confirm_key(app, key_code)?,
     }
@@ -215,6 +216,10 @@ fn handle_scanning_key(app: &mut TuiApp, key_code: KeyCode) -> io::Result<()> {
         _ => {}
     }
 
+    Ok(())
+}
+
+fn handle_deleting_key(_app: &mut TuiApp, _key_code: KeyCode) -> io::Result<()> {
     Ok(())
 }
 

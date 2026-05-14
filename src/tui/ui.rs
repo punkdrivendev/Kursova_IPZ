@@ -2,11 +2,11 @@ use crate::models::{FileCategory, NodeType};
 use crate::tui::app::{AppScreen, TreeRow, TuiApp};
 
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    Frame,
 };
 
 pub fn render(frame: &mut Frame, app: &TuiApp) {
@@ -17,6 +17,7 @@ pub fn render(frame: &mut Frame, app: &TuiApp) {
         AppScreen::SavedDirectoryChoice => render_saved_directory_choice(frame, app),
         AppScreen::DiskSelection => render_disk_selection(frame, app),
         AppScreen::Scanning => render_scanning(frame, app),
+        AppScreen::Deleting => render_deleting(frame, app),
         AppScreen::FileTree => render_file_tree_screen(frame, app),
         AppScreen::DeleteConfirm => render_delete_confirm(frame, app),
     }
@@ -300,7 +301,11 @@ fn build_info_text(row: &TreeRow) -> String {
     };
 
     let expanded = if row.node_type == NodeType::Directory {
-        if row.is_expanded { "yes" } else { "no" }
+        if row.is_expanded {
+            "yes"
+        } else {
+            "no"
+        }
     } else {
         "-"
     };
@@ -351,6 +356,18 @@ fn render_scanning(frame: &mut Frame, app: &TuiApp) {
 
     let paragraph = Paragraph::new(text)
         .block(Block::default().title("Scanning").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, frame.area());
+}
+
+fn render_deleting(frame: &mut Frame, app: &TuiApp) {
+    let dots = ".".repeat(app.deleting_dots());
+
+    let text = format!("Deleting{}\n\n{}", dots, app.status_message());
+
+    let paragraph = Paragraph::new(text)
+        .block(Block::default().title("Deleting").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, frame.area());
