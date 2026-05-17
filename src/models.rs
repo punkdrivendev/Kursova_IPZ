@@ -18,7 +18,7 @@ pub struct FileNode {
     pub category: Option<FileCategory>,
 }
 #[derive(Debug, Clone)]
-pub struct FileStatistic { // Енумератор для статистики файлів 
+pub struct FileStatistic {
     pub category: FileCategory,
     pub file_count: usize,
     pub total_size: u64,
@@ -26,7 +26,7 @@ pub struct FileStatistic { // Енумератор для статистики �
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FileCategory { // Енумератор для категорій файлів
+pub enum FileCategory {
     Video,
     Audio,
     Documents,
@@ -38,7 +38,7 @@ pub enum FileCategory { // Енумератор для категорій фай
 }
 
 impl FileCategory {
-    pub fn as_str(&self) -> &'static str { //
+    pub fn as_str(&self) -> &'static str {
         match self {
             FileCategory::Video => "video",
             FileCategory::Audio => "audio",
