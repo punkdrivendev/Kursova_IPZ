@@ -95,6 +95,16 @@ fn test_filter_by_extension_pdf_in_nested_directory() {
 }
 
 #[test]
+fn test_filter_by_extension_is_case_insensitive() {
+    let root = create_test_tree();
+
+    let result = FilterService::by_extension(&root, "PDF");
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "report.pdf");
+}
+
+#[test]
 fn test_filter_by_unknown_extension() {
     let root = create_test_tree();
 
