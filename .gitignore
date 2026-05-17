@@ -1,3 +1,17 @@
-/target
-Cargo.lock
-/data
+/target/
+/data/
+
+# Local runtime data
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
